@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  herdr-opencode build
+  herdr-opencode run [opencode arguments...]
+  herdr-opencode doctor
+
+Commands:
+  build    Build the reusable Linux arm64 OpenCode image.
+  run      Run OpenCode for the Git repository in the current directory.
+  doctor   Check local prerequisites and the reusable image.
+
+Environment overrides:
+  HERDR_OPENCODE_IMAGE         Image tag (default: herdr-opencode:arm64)
+  HERDR_OPENCODE_STATE_VOLUME  State volume (default: per-repository volume)
+  HERDR_OPENCODE_CPUS          CPU limit (default: 4)
+  HERDR_OPENCODE_MEMORY        Memory limit (default: 6G)
+  HERDR_OPENCODE_FORWARD_API_KEYS  Set to 1 to pass common API keys into the container
+  HERDR_OPENCODE_SKIP_NETWORK  Set to 1 to skip the GitHub connectivity check
+EOF
+}
+
+script_path=${BASH_SOURCE[0]}
+while [[ -L "$script_path" ]]; do
+  link=$(readlink "$script_path")
+  if [[ "$link" == /* ]]; then
+    script_path=$link
+  else
+    script_path=$(dirname "$script_path")/$link
+  fi
+done
+runtime_root=$(cd -- "$(dirname -- "$script_path")/.." && pwd)
+
+image=${HERDR_OPENCODE_IMAGE:-herdr-opencode:arm64}
+state_volume=${HERDR_OPENCODE_STATE_VOLUME:-}
+platform=${HERDR_OPENCODE_PLATFORM:-linux/arm64}
+cpus=${HERDR_OPENCODE_CPUS:-4}
+memory=${HERDR_OPENCODE_MEMORY:-6G}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'Required command not found: %s\n' "$1" >&2
+    return 1
+  fi
+}
+
+repository_root() {
+  local root
+  if ! root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    printf '%s\n' 'Run this command from inside a Git repository.' >&2
+    return 1
+  fi
+  printf '%s\n' "$root"
+}
+
+check_container_system() {
+  if ! container system status >/dev/null 2>&1; then
+    printf '%s\n' 'Apple container services are not running. Start them with:' >&2
+    printf '%s\n' '  container system start --disable-kernel-install' >&2
+    return 1
+  fi
+}
+
+check_network() {
+  if [[ "${HERDR_OPENCODE_SKIP_NETWORK:-0}" == 1 ]]; then
+    return 0
+  fi
+
+  if ! container run --rm --platform "$platform" --entrypoint /bin/sh "$image" \
+    -c 'curl -fsS --max-time 5 -o /dev/null https://api.github.com'; then
+    printf '%s\n' 'The Apple container network cannot reach GitHub.' >&2
+    printf '%s\n' 'Restart the container services, then retry:' >&2
+    printf '%s\n' '  container system stop' >&2
+    printf '%s\n' '  container system start --disable-kernel-install' >&2
+    return 1
+  fi
+}
+
+build_image() {
+  require_command container
+  container build \
+    --platform "$platform" \
+    --file "$runtime_root/container/opencode/Dockerfile" \
+    --tag "$image" \
+    "$runtime_root/container/opencode"
+
+  printf 'Built %s.\n' "$image"
+}
+
+run_opencode() {
+  require_command container
+  require_command git
+
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    printf '%s\n' 'Run this command from an interactive Herdr pane (stdin/stdout must be a TTY).' >&2
+    return 1
+  fi
+
+  if [[ "${HERDR_ENV:-}" != 1 ]]; then
+    printf '%s\n' 'Run this command from a Herdr-managed pane (HERDR_ENV=1).' >&2
+    return 1
+  fi
+
+  : "${HERDR_PANE_ID:?HERDR_PANE_ID is required}"
+  repo_root=$(repository_root)
+
+  if [[ -z "$state_volume" ]]; then
+    repo_id=$(printf '%s' "$repo_root" | shasum -a 256 | cut -c1-16)
+    state_volume="herdr-opencode-state-$repo_id"
+  fi
+
+  if ! container image inspect "$image" >/dev/null 2>&1; then
+    printf 'Image %s is not available. Build it with:\n' "$image" >&2
+    printf '  herdr-opencode build\n' >&2
+    return 1
+  fi
+
+  check_container_system
+  check_network
+
+  container_name="herdr-opencode-$(printf '%s' "$HERDR_PANE_ID" | tr -c '[:alnum:]_.-' '-')"
+  export HERDR_AGENT=opencode
+
+  container_args=(
+    run
+    --name "$container_name"
+    --platform "$platform"
+    --init
+    --interactive
+    --tty
+    --rm
+    --cpus "$cpus"
+    --memory "$memory"
+    --volume "$repo_root:/workspace/project"
+    --volume "$state_volume:/root/.local/share/opencode"
+    --env "TERM=${TERM:-xterm-256color}"
+    --env "LANG=${LANG:-C.UTF-8}"
+    --env "COLORTERM=${COLORTERM:-}"
+    --workdir /workspace/project
+  )
+
+  if [[ "${HERDR_OPENCODE_FORWARD_API_KEYS:-0}" == 1 ]]; then
+    container_args+=(
+      --env ANTHROPIC_API_KEY
+      --env OPENAI_API_KEY
+      --env GOOGLE_API_KEY
+    )
+  fi
+
+  exec container "${container_args[@]}" "$image" "$@"
+}
+
+doctor() {
+  local repo_root
+  require_command git
+  require_command container
+
+  printf 'Runtime: %s\n' "$runtime_root"
+  if repo_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    printf 'Repository: %s\n' "$repo_root"
+  else
+    printf '%s\n' 'Repository: not in a Git repository (build is still available)'
+  fi
+  printf 'Image: %s\n' "$image"
+  if [[ -n "$state_volume" ]]; then
+    printf 'State volume: %s (explicit)\n' "$state_volume"
+  else
+    printf '%s\n' 'State volume: per-repository (computed when running)'
+  fi
+
+  if container system status >/dev/null 2>&1; then
+    printf '%s\n' 'Container services: running'
+  else
+    printf '%s\n' 'Container services: not running'
+  fi
+
+  if container image inspect "$image" >/dev/null 2>&1; then
+    printf '%s\n' 'Image status: available'
+  else
+    printf '%s\n' 'Image status: missing (run: herdr-opencode build)'
+  fi
+}
+
+command_name=${1:-run}
+case "$command_name" in
+  build)
+    shift
+    [[ $# -eq 0 ]] || { usage >&2; exit 2; }
+    build_image
+    ;;
+  run)
+    shift
+    run_opencode "$@"
+    ;;
+  doctor)
+    shift
+    [[ $# -eq 0 ]] || { usage >&2; exit 2; }
+    doctor
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$command_name" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -1,56 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${HERDR_ENV:-}" != 1 ]]; then
-  printf '%s\n' 'Run this command from a Herdr-managed pane (HERDR_ENV=1).' >&2
-  exit 1
-fi
-
-if [[ ! -t 0 || ! -t 1 ]]; then
-  printf '%s\n' 'Run this command from an interactive Herdr pane (stdin/stdout must be a TTY).' >&2
-  exit 1
-fi
-
-: "${HERDR_PANE_ID:?HERDR_PANE_ID is required}"
-
-repo_root=$(git rev-parse --show-toplevel)
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-container_name="herdr-opencode-${HERDR_PANE_ID//[:]/-}"
-
-if ! container system status >/dev/null 2>&1; then
-  printf '%s\n' 'Apple container services are not running. Start them with:' >&2
-  printf '%s\n' '  container system start --disable-kernel-install' >&2
-  exit 1
-fi
-
-if ! container run --rm --platform linux/arm64 --entrypoint /bin/sh alpine:latest \
-  -c 'wget -q --timeout=5 --tries=1 -O /dev/null https://api.github.com'; then
-  printf '%s\n' 'The Apple container network cannot reach GitHub.' >&2
-  printf '%s\n' 'Restart the container services, then retry:' >&2
-  printf '%s\n' '  container system stop' >&2
-  printf '%s\n' '  container system start --disable-kernel-install' >&2
-  exit 1
-fi
-
-export HERDR_AGENT=opencode
-
-exec container run \
-  --name "$container_name" \
-  --platform linux/arm64 \
-  --init \
-  --interactive \
-  --tty \
-  --rm \
-  --cpus 4 \
-  --memory 6G \
-  --volume "$repo_root:/workspace/project" \
-  --volume herdr-opencode-state:/root/.local/share/opencode \
-  --env TERM="${TERM:-xterm-256color}" \
-  --env LANG="${LANG:-C.UTF-8}" \
-  --env COLORTERM="${COLORTERM:-}" \
-  --env ANTHROPIC_API_KEY \
-  --env OPENAI_API_KEY \
-  --env GOOGLE_API_KEY \
-  --workdir /workspace/project \
-  herdr-opencode:arm64 \
-  "$@"
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+exec "$repo_root/bin/herdr-opencode" run "$@"

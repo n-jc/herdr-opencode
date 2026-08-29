@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+install_dir=${HERDR_OPENCODE_INSTALL_DIR:-"$HOME/.local/bin"}
+destination="$install_dir/herdr-opencode"
+
+mkdir -p "$install_dir"
+
+if [[ -e "$destination" && ! -L "$destination" ]]; then
+  printf 'Refusing to replace existing file: %s\n' "$destination" >&2
+  exit 1
+fi
+
+ln -sfn "$repo_root/bin/herdr-opencode" "$destination"
+printf 'Installed herdr-opencode at %s\n' "$destination"
+
+case ":${PATH}:" in
+  *:"$install_dir":*) ;;
+  *)
+    printf 'Add this directory to PATH if needed:\n'
+    printf '  export PATH="%s:$PATH"\n' "$install_dir"
+    ;;
+esac
+
+printf '%s\n' 'Next steps:'
+printf '%s\n' '  herdr-opencode doctor'
+printf '%s\n' '  herdr-opencode build'

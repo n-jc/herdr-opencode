@@ -1,4 +1,12 @@
 __pycache__/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.secret
 container/opencode/herdr-agent-state.js
 container/opencode/herdr-tui-session.js
 container/opencode/tui.jsonc

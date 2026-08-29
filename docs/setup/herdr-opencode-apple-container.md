@@ -1,9 +1,11 @@
 # Herdr + OpenCode in Apple Container
 
 This setup keeps Herdr native on macOS and runs OpenCode plus the project
-toolchain inside an Apple Linux container. Herdr identifies the host-side
-container command as OpenCode through `HERDR_AGENT=opencode` and uses its
-screen manifest for lifecycle detection.
+toolchain inside an Apple Linux container. The reusable launcher and image
+definition live in this repository; target repositories do not need copies of
+those files. Herdr identifies the host-side container command as OpenCode
+through `HERDR_AGENT=opencode` and uses its screen manifest for lifecycle
+detection.
 
 This is a conservative variant of Option B. It deliberately does not bridge
 Herdr's control socket into the container. OpenCode remains visible and
@@ -12,10 +14,10 @@ reports are not available across this VM boundary.
 
 ## Prerequisites
 
-- Apple Silicon Mac. This procedure targets the current M2 host.
+- Apple Silicon Mac. This procedure targets the arm64 architecture.
 - macOS and Apple `container` installed.
 - Herdr installed and running on the host.
-- This repository checked out locally.
+- This repository checked out locally and installed with `./scripts/install`.
 - API credentials available as environment variables, or login performed
   inside the persistent OpenCode volume.
 
@@ -73,8 +75,12 @@ OpenSSH client, jq, less, file, patch, diffutils, findutils, tar, gzip, xz,
 unzip, and OpenSSL. It intentionally excludes language-specific runtimes and
 all Herdr OpenCode plugins:
 
+From this repository, run `./scripts/install` once. Then build the image from
+any Git repository:
+
 ```bash
-./scripts/setup-opencode-container
+herdr-opencode doctor
+herdr-opencode build
 ```
 
 The image is tagged `herdr-opencode:arm64`. The OpenCode base image is pinned
@@ -89,10 +95,10 @@ container image inspect herdr-opencode:arm64
 
 ## 4. Launch from a Herdr pane
 
-Open a Herdr pane whose working directory is this repository, then run:
+Open a Herdr pane whose working directory is the target repository, then run:
 
 ```bash
-./scripts/run-opencode-container
+herdr-opencode run
 ```
 
 The launcher requires `HERDR_ENV=1`, `HERDR_PANE_ID`, and an interactive
@@ -102,8 +108,8 @@ non-interactive process to a Herdr pane.
 The launcher does the following:
 
 1. Sets `HERDR_AGENT=opencode` for host-side Herdr process detection.
-2. Mounts only this repository at `/workspace/project`.
-3. Persists OpenCode data in the named volume `herdr-opencode-state`.
+2. Mounts only the target repository at `/workspace/project`.
+3. Persists OpenCode data in a stable per-repository named volume by default.
 4. Starts OpenCode in the mounted repository with a TTY.
 5. Forwards the host terminal capability variables so the OpenCode TUI can
    negotiate screen size, colors, and terminal features.
@@ -115,7 +121,9 @@ The launcher sets `HERDR_AGENT=opencode` on the host-side foreground wrapper.
 It intentionally does not mount the host home directory, forward the host SSH
 agent, publish an OpenCode HTTP port, or expose the Herdr control socket. The
 container uses `--rm`: the container is disposable, while the named OpenCode
-state volume persists.
+state volume persists. The default state volume is derived from the absolute
+target repository path. Set `HERDR_OPENCODE_STATE_VOLUME` explicitly when
+sharing state across repositories is intentional.
 
 Before starting OpenCode, the launcher checks that a fresh Apple container can
 reach `https://api.github.com`. This catches a stale Apple NAT session before
@@ -124,13 +132,15 @@ provider authentication is attempted.
 To pass a one-off OpenCode argument:
 
 ```bash
-./scripts/run-opencode-container --continue
+herdr-opencode run --continue
 ```
 
-The wrapper forwards the common `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
-`GOOGLE_API_KEY` variables when they are present in the Herdr pane environment.
-For other providers, use `opencode auth login` inside the container; the
-credentials will be stored in `herdr-opencode-state` rather than on the host.
+The wrapper does not forward API keys by default. For a trusted target
+repository, set `HERDR_OPENCODE_FORWARD_API_KEYS=1` to forward the common
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GOOGLE_API_KEY` variables when they
+are present in the Herdr pane environment. For other providers, use `opencode
+auth login` inside the container; credentials will be stored in the
+per-repository state volume rather than in the target repository.
 
 ### GitHub Copilot
 
@@ -150,14 +160,14 @@ on the macOS host; it does not need to be opened inside the container.
 
 OpenCode stores the resulting credential at
 `/root/.local/share/opencode/auth.json` inside the container. That directory is
-the persistent `herdr-opencode-state` volume, so the login survives container
+the persistent per-repository state volume, so the login survives container
 recreation. It is not written to the host's OpenCode configuration.
 
 To authenticate without the TUI, use the container's OpenCode CLI:
 
 ```bash
 container run --rm --platform linux/arm64 --interactive --tty \
-  --volume herdr-opencode-state:/root/.local/share/opencode \
+  --volume <repository-state-volume>:/root/.local/share/opencode \
   herdr-opencode:arm64 auth login --provider github-copilot
 ```
 
@@ -202,17 +212,18 @@ remains available. To start a new session with the same state, rerun the
 launcher from a Herdr pane:
 
 ```bash
-./scripts/run-opencode-container --continue
+herdr-opencode run --continue
 ```
 
 The host wrapper does not create a socket proxy. Rerunning the launcher creates
 a fresh container while the named OpenCode state volume remains available.
 
-Delete the state volume only when its OpenCode sessions and credentials are no
-longer needed:
+List state volumes and delete one only when its OpenCode sessions and
+credentials are no longer needed:
 
 ```bash
-container volume delete herdr-opencode-state
+container volume list
+container volume delete <repository-state-volume>
 ```
 
 Do not run `container volume prune` casually; it permanently deletes unused
@@ -253,8 +264,8 @@ current Herdr version.
 Test the Apple container network from the host:
 
 ```bash
-container run --rm --platform linux/arm64 --entrypoint /bin/sh alpine:latest \
-  -c 'wget -S -O /dev/null --timeout=10 --tries=1 https://api.github.com'
+container run --rm --platform linux/arm64 --entrypoint /bin/sh herdr-opencode:arm64 \
+  -c 'curl -fS -o /dev/null --max-time 10 https://api.github.com'
 ```
 
 If it times out while the same URL works on the Mac, restart the Apple
@@ -264,7 +275,7 @@ launcher afterward:
 ```bash
 container system stop
 container system start --disable-kernel-install
-./scripts/run-opencode-container
+herdr-opencode run
 ```
 
 Once the network check succeeds, `/connect` -> **GitHub Copilot** -> **GitHub.com
