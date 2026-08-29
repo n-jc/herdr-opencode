@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+container build \
+  --platform linux/arm64 \
+  --file "$repo_root/container/opencode/Dockerfile" \
+  --tag herdr-opencode:arm64 \
+  "$repo_root/container/opencode"
+
+printf '%s\n' 'Built herdr-opencode:arm64.'

@@ -1,0 +1,4 @@
+__pycache__/
+container/opencode/herdr-agent-state.js
+container/opencode/herdr-tui-session.js
+container/opencode/tui.jsonc
